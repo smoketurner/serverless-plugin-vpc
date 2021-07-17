@@ -1,4 +1,4 @@
-const AWS = require('aws-sdk-mock');
+const AWS = require('aws-sdk');
 const nock = require('nock');
 
 const Serverless = require('serverless');
@@ -11,6 +11,7 @@ describe('ServerlessVpcPlugin', () => {
 
   beforeEach(() => {
     nock.disableNetConnect();
+    nock.recorder.rec();
 
     const options = {
       stage: 'dev',
@@ -20,8 +21,7 @@ describe('ServerlessVpcPlugin', () => {
     serverless.cli = new serverless.classes.CLI();
 
     const provider = new AwsProvider(serverless, options);
-    // provider.sdk.config.logger = console;
-    AWS.setSDKInstance(provider.sdk);
+    provider.sdk.config.logger = console;
 
     provider.cachedCredentials = {
       credentials: {
@@ -40,7 +40,10 @@ describe('ServerlessVpcPlugin', () => {
   });
 
   afterEach(() => {
-    AWS.restore();
+    // AWS.restore();
+    AWS.clearAllMocks();
+    nock.restore();
+    nock.cleanAll();
   });
 
   describe('#constructor', () => {
@@ -119,20 +122,14 @@ describe('ServerlessVpcPlugin', () => {
     });
 
     it('should discover available zones', async () => {
-      const mockCallback = jest.fn((params, callback) => {
-        expect(params.Filters[0].Values[0]).toEqual('us-east-1');
-        const response = {
-          AvailabilityZones: [
-            {
-              State: 'available',
-              ZoneName: 'us-east-1a',
-            },
-          ],
-        };
-        return callback(null, response);
+      const mock = AWS.spyOnPromise('EC2', 'describeAvailabilityZones', {
+        AvailabilityZones: [
+          {
+            State: 'available',
+            ZoneName: 'us-east-1a',
+          },
+        ],
       });
-
-      AWS.mock('EC2', 'describeAvailabilityZones', mockCallback);
 
       serverless.service.custom.vpcConfig = {
         services: [],
@@ -140,8 +137,24 @@ describe('ServerlessVpcPlugin', () => {
 
       const actual = await plugin.afterInitialize();
       expect(actual).toBeUndefined();
-      expect(mockCallback).toHaveBeenCalled();
-      expect.assertions(3);
+
+      expect(mock).toHaveBeenCalledWith({
+        Filters: [
+          {
+            Name: 'region-name',
+            Values: ['us-east-1'],
+          },
+          {
+            Name: 'opt-in-status',
+            Values: ['opt-in-not-required'],
+          },
+          {
+            Name: 'state',
+            Values: ['available'],
+          },
+        ],
+      });
+      expect.assertions(2);
     });
 
     it('rejects invalid subnet groups', async () => {
@@ -160,50 +173,54 @@ describe('ServerlessVpcPlugin', () => {
 
   describe('#getZonesPerRegion', () => {
     it('returns the zones in a region', async () => {
-      const mockCallback = jest.fn((params, callback) => {
-        expect(params.Filters[0].Values[0]).toEqual('us-east-1');
-        const response = {
-          AvailabilityZones: [
-            {
-              State: 'available',
-              ZoneName: 'us-east-1b',
-            },
-            {
-              State: 'available',
-              ZoneName: 'us-east-1a',
-            },
-          ],
-        };
-        return callback(null, response);
+      const mock = AWS.spyOnPromise('EC2', 'describeAvailabilityZones', {
+        AvailabilityZones: [
+          {
+            State: 'available',
+            ZoneName: 'us-east-1b',
+          },
+          {
+            State: 'available',
+            ZoneName: 'us-east-1a',
+          },
+        ],
       });
-
-      AWS.mock('EC2', 'describeAvailabilityZones', mockCallback);
 
       const actual = await plugin.getZonesPerRegion('us-east-1');
 
       const expected = ['us-east-1a', 'us-east-1b'];
 
-      expect(mockCallback).toHaveBeenCalled();
+      expect(mock).toHaveBeenCalledWith({
+        Filters: [
+          {
+            Name: 'region-name',
+            Values: ['us-east-1'],
+          },
+          {
+            Name: 'opt-in-status',
+            Values: ['opt-in-not-required'],
+          },
+          {
+            Name: 'state',
+            Values: ['available'],
+          },
+        ],
+      });
       expect(actual).toEqual(expected);
-      expect.assertions(3);
+      expect.assertions(2);
     });
   });
 
   describe('#getVpcEndpointServicesPerRegion', () => {
     it('returns the endpoint services in a region', async () => {
-      const mockCallback = jest.fn((params, callback) => {
-        const response = {
-          ServiceNames: [
-            'com.amazonaws.us-east-1.dynamodb',
-            'com.amazonaws.us-east-1.s3',
-            'com.amazonaws.us-east-1.kms',
-            'com.amazonaws.us-east-1.kinesis-streams',
-          ],
-        };
-        return callback(null, response);
+      const mock = AWS.spyOnPromise('EC2', 'describeVpcEndpointServices', {
+        ServiceNames: [
+          'com.amazonaws.us-east-1.dynamodb',
+          'com.amazonaws.us-east-1.s3',
+          'com.amazonaws.us-east-1.kms',
+          'com.amazonaws.us-east-1.kinesis-streams',
+        ],
       });
-
-      AWS.mock('EC2', 'describeVpcEndpointServices', mockCallback);
 
       const actual = await plugin.getVpcEndpointServicesPerRegion('us-east-1');
 
@@ -214,7 +231,7 @@ describe('ServerlessVpcPlugin', () => {
         'com.amazonaws.us-east-1.s3',
       ];
 
-      expect(mockCallback).toHaveBeenCalled();
+      expect(mock).toHaveBeenCalledWith({ MaxResults: 1000 });
       expect(actual).toEqual(expected);
       expect.assertions(2);
     });
@@ -222,80 +239,99 @@ describe('ServerlessVpcPlugin', () => {
 
   describe('#getImagesByName', () => {
     it('returns an AMI image by name', async () => {
-      const mockCallback = jest.fn((params, callback) => {
-        expect(params.Filters.find((f) => f.Name === 'name').Values).toEqual(['test']);
-        const response = {
-          Images: [
-            {
-              ImageId: 'ami-test',
-              CreationDate: '2019-04-12T00:00:00Z',
-            },
-          ],
-        };
-        return callback(null, response);
+      const mock = AWS.spyOnPromise('EC2', 'describeImages', {
+        Images: [
+          {
+            ImageId: 'ami-test',
+            CreationDate: '2019-04-12T00:00:00Z',
+          },
+        ],
       });
-
-      AWS.mock('EC2', 'describeImages', mockCallback);
 
       const actual = await plugin.getImagesByName('test');
       expect(actual).toEqual(['ami-test']);
-      expect(mockCallback).toHaveBeenCalled();
-      expect.assertions(3);
+      expect(mock).toHaveBeenCalledWith({
+        Filters: [
+          {
+            Name: 'architecture',
+            Values: ['x86_64'],
+          },
+          {
+            Name: 'image-type',
+            Values: ['machine'],
+          },
+          {
+            Name: 'is-public',
+            Values: ['true'],
+          },
+          {
+            Name: 'name',
+            Values: ['test'],
+          },
+          {
+            Name: 'state',
+            Values: ['available'],
+          },
+          {
+            Name: 'root-device-type',
+            Values: ['ebs'],
+          },
+          {
+            Name: 'virtualization-type',
+            Values: ['hvm'],
+          },
+        ],
+        Owners: ['amazon'],
+      });
+      expect.assertions(2);
     });
   });
 
   describe('#validateServices', () => {
     it('returns validated services', async () => {
-      const mockCallback = jest.fn((params, callback) => {
-        const response = {
-          ServiceNames: [
-            'com.amazonaws.us-east-1.dynamodb',
-            'com.amazonaws.us-east-1.s3',
-            'com.amazonaws.us-east-1.kms',
-            'com.amazonaws.us-east-1.kinesis-streams',
-          ],
-        };
-        return callback(null, response);
+      const mock = AWS.spyOnPromise('EC2', 'describeVpcEndpointServices', {
+        ServiceNames: [
+          'com.amazonaws.us-east-1.dynamodb',
+          'com.amazonaws.us-east-1.s3',
+          'com.amazonaws.us-east-1.kms',
+          'com.amazonaws.us-east-1.kinesis-streams',
+        ],
       });
 
-      AWS.mock('EC2', 'describeVpcEndpointServices', mockCallback);
-
       const actual = await plugin.validateServices('us-east-1', ['blah']);
-      expect(actual).toEqual(['com.amazonaws.us-east-1.blah']);
-      expect(mockCallback).toHaveBeenCalled();
+
+      const expected = ['com.amazonaws.us-east-1.blah'];
+
+      expect(actual).toEqual(expected);
+      expect(mock).toHaveBeenCalledWith({ MaxResults: 1000 });
       expect.assertions(2);
     });
   });
 
   describe('#getPrefixLists', () => {
     it('returns the prefix lists', async () => {
-      const mockCallback = jest.fn((params, callback) => {
-        const response = {
-          PrefixLists: [
-            {
-              PrefixListId: 'pl-02cd2c6b',
-              AddressFamily: 'IPv4',
-              State: 'create-complete',
-              PrefixListArn: 'arn:aws:ec2:us-east-1:aws:prefix-list/pl-02cd2c6b',
-              PrefixListName: 'com.amazonaws.us-east-1.dynamodb',
-              Tags: [],
-              OwnerId: 'AWS',
-            },
-            {
-              PrefixListId: 'pl-63a5400a',
-              AddressFamily: 'IPv4',
-              State: 'create-complete',
-              PrefixListArn: 'arn:aws:ec2:us-east-1:aws:prefix-list/pl-63a5400a',
-              PrefixListName: 'com.amazonaws.us-east-1.s3',
-              Tags: [],
-              OwnerId: 'AWS',
-            },
-          ],
-        };
-        return callback(null, response);
+      const mock = AWS.spyOnPromise('EC2', 'describeManagedPrefixLists', {
+        PrefixLists: [
+          {
+            PrefixListId: 'pl-02cd2c6b',
+            AddressFamily: 'IPv4',
+            State: 'create-complete',
+            PrefixListArn: 'arn:aws:ec2:us-east-1:aws:prefix-list/pl-02cd2c6b',
+            PrefixListName: 'com.amazonaws.us-east-1.dynamodb',
+            Tags: [],
+            OwnerId: 'AWS',
+          },
+          {
+            PrefixListId: 'pl-63a5400a',
+            AddressFamily: 'IPv4',
+            State: 'create-complete',
+            PrefixListArn: 'arn:aws:ec2:us-east-1:aws:prefix-list/pl-63a5400a',
+            PrefixListName: 'com.amazonaws.us-east-1.s3',
+            Tags: [],
+            OwnerId: 'AWS',
+          },
+        ],
       });
-
-      AWS.mock('EC2', 'describeManagedPrefixLists', mockCallback);
 
       const expected = {
         s3: 'pl-63a5400a',
@@ -304,7 +340,14 @@ describe('ServerlessVpcPlugin', () => {
 
       const actual = await plugin.getPrefixLists();
       expect(actual).toEqual(expected);
-      expect(mockCallback).toHaveBeenCalled();
+      expect(mock).toHaveBeenCalledWith({
+        Filters: [
+          {
+            Name: 'owner-id',
+            Values: ['AWS'],
+          },
+        ],
+      });
       expect.assertions(2);
     });
   });
